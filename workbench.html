@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>执业工作台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+  .wb-display { font-family: 'Fraunces', serif; }
+  .wb-body { font-family: 'Inter', sans-serif; }
+  .wb-mono { font-family: 'IBM Plex Mono', monospace; }
+  .spin { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/plain" id="app-source">
+
+const { useState, useEffect, useCallback } = React;
+
+// ---------- design tokens ----------
+const COLORS = {
+  paper: "#E9E4D4", ink: "#2B2A28", inkSoft: "#5C574C",
+  coaching: "#3F6259", coachingSoft: "#DCE7E2",
+  content: "#B07E2C", contentSoft: "#F0E3C8",
+  daily: "#A15242", dailySoft: "#F1DCD5",
+  progress: "#3B5674", progressSoft: "#DCE3EC",
+  line: "#C9C1AA",
+};
+
+// ---------- tiny inline icons ----------
+const Icon = ({ children, size = 16, color = "currentColor", spin: doSpin }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color}
+       strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+       className={doSpin ? "spin" : ""}>{children}</svg>
+);
+const IconNotebook = (p) => <Icon {...p}><path d="M4 4h13a2 2 0 0 1 2 2v14l-3-2-3 2-3-2-3 2V6a2 2 0 0 1 2-2z"/><path d="M14 8l4-4"/></Icon>;
+const IconSparkles = (p) => <Icon {...p}><path d="M12 3l1.6 4.4L18 9l-4.4 1.6L12 15l-1.6-4.4L6 9l4.4-1.6z"/><path d="M19 15l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z"/></Icon>;
+const IconInbox = (p) => <Icon {...p}><path d="M3 12h4l2 3h6l2-3h4"/><path d="M5 12l1-7h12l1 7"/><path d="M5 12v6h14v-6"/></Icon>;
+const IconCompass = (p) => <Icon {...p}><circle cx="12" cy="12" r="9"/><path d="M15 9l-2 6-6 2 2-6z"/></Icon>;
+const IconPlus = (p) => <Icon {...p}><path d="M12 5v14M5 12h14"/></Icon>;
+const IconTrash = (p) => <Icon {...p}><path d="M4 7h16"/><path d="M9 7V4h6v3"/><path d="M6 7l1 13h10l1-13"/></Icon>;
+const IconLoader = (p) => <Icon {...p} spin><path d="M12 3a9 9 0 1 0 9 9"/></Icon>;
+const IconCheck = (p) => <Icon {...p}><path d="M5 13l4 4L19 7"/></Icon>;
+const IconGear = (p) => <Icon {...p}><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9c0 .7.4 1.3 1 1.5h.1a2 2 0 1 1 0 4h-.1c-.7 0-1.3.4-1.6 1z"/></Icon>;
+
+const TABS = [
+  { key: "coaching", label: "教练日志", icon: IconNotebook, color: COLORS.coaching },
+  { key: "content", label: "创作火花", icon: IconSparkles, color: COLORS.content },
+  { key: "box", label: "潘多拉魔盒", icon: IconInbox, color: COLORS.daily },
+  { key: "guide", label: "罗盘指南", icon: IconCompass, color: COLORS.progress },
+];
+
+const STORAGE_KEY = "workbench-data";
+const API_KEY_STORAGE = "workbench-api-key";
+
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const fmtDate = (iso) => {
+  try { return new Date(iso + "T00:00:00").toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", weekday: "short" }); }
+  catch { return iso; }
+};
+const fmtTime = (ts) => {
+  try { return new Date(ts).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
+  catch { return ""; }
+};
+
+async function callClaude(system, user, apiKey) {
+  if (!apiKey) throw new Error("请先在右上角设置里填入你的 Anthropic API Key");
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true",
+    },
+    body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 1500, system, messages: [{ role: "user", content: user }] }),
+  });
+  if (!res.ok) { const t = await res.text().catch(() => ""); throw new Error("API 请求失败：" + res.status + " " + t.slice(0, 200)); }
+  const data = await res.json();
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n").trim();
+  if (!text) throw new Error("没有收到有效回复");
+  return text;
+}
+
+function extractJSON(text) {
+  const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  const start = cleaned.indexOf("[");
+  const end = cleaned.lastIndexOf("]");
+  if (start === -1 || end === -1) throw new Error("没能解析出结果");
+  return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+const emptyData = () => ({ sessions: [], ideas: [], boxEntries: [], publishPlan: null });
+
+function migrate(d) {
+  const next = Object.assign(emptyData(), d);
+  if (!Array.isArray(next.boxEntries)) next.boxEntries = [];
+  if (Array.isArray(d.dailyLogs) && d.dailyLogs.length && !next.boxEntries.length) {
+    next.boxEntries = d.dailyLogs.map(l => ({ id: l.id || uid(), text: l.note || l.nextStep || "", createdAt: l.createdAt || Date.now(), triage: null, todoText: null, done: false }));
+  }
+  next.boxEntries = next.boxEntries.map(e => Object.assign({ triage: null, todoText: null, done: false }, e));
+  if (!("publishPlan" in next)) next.publishPlan = d.progressOverview || null;
+  return next;
+}
+
+function loadData() {
+  try { const raw = localStorage.getItem(STORAGE_KEY); return migrate(raw ? JSON.parse(raw) : {}); }
+  catch { return emptyData(); }
+}
+function saveData(d) { try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {} }
+
+// ---------- shared bits ----------
+function SectionLabel({ children, color }) {
+  return <div className="wb-mono text-xs tracking-widest uppercase mb-3" style={{ color, letterSpacing: "0.12em" }}>{children}</div>;
+}
+function PrimaryButton({ onClick, disabled, children, color, icon: Ico }) {
+  return (
+    <button onClick={onClick} disabled={disabled}
+      className="wb-body inline-flex items-center gap-2 px-4 py-2 rounded-sm text-sm font-medium disabled:opacity-50"
+      style={{ backgroundColor: color, color: COLORS.paper }}>
+      {disabled ? <IconLoader size={15} /> : Ico ? <Ico size={15} /> : null}
+      {children}
+    </button>
+  );
+}
+function EmptyState({ text }) {
+  return <div className="wb-body text-sm py-8 text-center rounded-sm border border-dashed" style={{ color: COLORS.inkSoft, borderColor: COLORS.line }}>{text}</div>;
+}
+
+// ---------- Coaching tab ----------
+function CoachingTab({ data, mutate, apiKey }) {
+  const [client, setClient] = useState(""); const [date, setDate] = useState(todayISO());
+  const [notes, setNotes] = useState(""); const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState(""); const [expanded, setExpanded] = useState({});
+
+  const addSession = () => {
+    if (!notes.trim()) return;
+    const entry = { id: uid(), client: client.trim() || "未命名来访者", date, notes: notes.trim(), summary: null, createdAt: Date.now() };
+    mutate(d => ({ ...d, sessions: [entry, ...d.sessions] }));
+    setClient(""); setNotes(""); setDate(todayISO());
+  };
+  const summarize = async (session) => {
+    setError(""); setBusyId(session.id);
+    try {
+      const summary = await callClaude(
+        "你是一位经验丰富的教练督导，帮助教练复盘单次会谈。请始终用中文回复，语气直接、具体、有建设性。",
+        `以下是一次教练对话的记录或笔记（来访者：${session.client}，日期：${session.date}）：\n\n${session.notes}\n\n请按结构给出简短复盘：\n1. 做得好的地方\n2. 可提升的地方\n3. 来访者的核心议题与可能的反馈/收获`,
+        apiKey
+      );
+      mutate(d => ({ ...d, sessions: d.sessions.map(s => s.id === session.id ? { ...s, summary } : s) }));
+      setExpanded(e => ({ ...e, [session.id]: true }));
+    } catch (e) { setError(e.message); } finally { setBusyId(null); }
+  };
+  const remove = (id) => mutate(d => ({ ...d, sessions: d.sessions.filter(s => s.id !== id) }));
+
+  return (
+    <div>
+      <SectionLabel color={COLORS.coaching}>记一次新的会谈</SectionLabel>
+      <div className="space-y-2 mb-6">
+        <div className="flex gap-2">
+          <input value={client} onChange={e => setClient(e.target.value)} placeholder="来访者（可留空）"
+            className="wb-body flex-1 px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+          <input type="date" value={date} onChange={e => setDate(e.target.value)}
+            className="wb-mono px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        </div>
+        <textarea value={notes} onChange={e => setNotes(e.target.value)} placeholder="粘贴录音转写、笔记或回忆要点…" rows={4}
+          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        <PrimaryButton onClick={addSession} color={COLORS.coaching} icon={IconPlus}>归档</PrimaryButton>
+      </div>
+      {error && <div className="wb-body text-sm mb-3" style={{ color: COLORS.daily }}>{error}</div>}
+      <SectionLabel color={COLORS.coaching}>会谈记录（{data.sessions.length}）</SectionLabel>
+      {data.sessions.length === 0 ? <EmptyState text="还没有记录 — 上面归档你的第一次会谈" /> : (
+        <div className="space-y-3">
+          {data.sessions.map(s => (
+            <div key={s.id} className="rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="wb-display text-base" style={{ color: COLORS.ink }}>{s.client}</div>
+                  <div className="wb-mono text-xs mt-0.5" style={{ color: COLORS.inkSoft }}>{fmtDate(s.date)}</div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {!s.summary && <PrimaryButton onClick={() => summarize(s)} disabled={busyId === s.id} color={COLORS.coaching}>AI 总结</PrimaryButton>}
+                  <button onClick={() => remove(s.id)} className="p-1.5 opacity-60 hover:opacity-100"><IconTrash size={15} color={COLORS.inkSoft} /></button>
+                  <button onClick={() => setExpanded(e => ({ ...e, [s.id]: !e[s.id] }))} className="wb-mono text-xs px-2 py-1" style={{ color: COLORS.inkSoft }}>{expanded[s.id] ? "收起" : "展开"}</button>
+                </div>
+              </div>
+              {expanded[s.id] && (
+                <div className="mt-3 space-y-3">
+                  {s.summary && <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3" style={{ backgroundColor: COLORS.coachingSoft, color: COLORS.ink }}>{s.summary}</div>}
+                  <details><summary className="wb-mono text-xs cursor-pointer" style={{ color: COLORS.inkSoft }}>原始笔记</summary>
+                    <div className="wb-body text-sm mt-2 whitespace-pre-wrap" style={{ color: COLORS.inkSoft }}>{s.notes}</div></details>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- Content tab ----------
+const CONTENT_TAGS = ["自媒体", "脑洞", "其他"];
+function ContentTab({ data, mutate }) {
+  const [text, setText] = useState(""); const [tag, setTag] = useState(CONTENT_TAGS[0]);
+  const add = () => { if (!text.trim()) return; mutate(d => ({ ...d, ideas: [{ id: uid(), text: text.trim(), tag, createdAt: Date.now() }, ...d.ideas] })); setText(""); };
+  const remove = (id) => mutate(d => ({ ...d, ideas: d.ideas.filter(i => i.id !== id) }));
+  return (
+    <div>
+      <SectionLabel color={COLORS.content}>随手记一个想法</SectionLabel>
+      <div className="space-y-2 mb-6">
+        <textarea value={text} onChange={e => setText(e.target.value)} placeholder="自媒体选题、脑洞、随便想聊的什么…" rows={3}
+          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        <div className="flex items-center gap-2 flex-wrap">
+          {CONTENT_TAGS.map(t => (
+            <button key={t} onClick={() => setTag(t)} className="wb-mono text-xs px-2.5 py-1 rounded-full border"
+              style={{ borderColor: tag === t ? COLORS.content : COLORS.line, backgroundColor: tag === t ? COLORS.contentSoft : "transparent", color: tag === t ? COLORS.content : COLORS.inkSoft }}>{t}</button>
+          ))}
+          <div className="flex-1" />
+          <PrimaryButton onClick={add} color={COLORS.content} icon={IconPlus}>记下来</PrimaryButton>
+        </div>
+      </div>
+      <SectionLabel color={COLORS.content}>想法清单（{data.ideas.length}）</SectionLabel>
+      {data.ideas.length === 0 ? <EmptyState text="脑洞还是空的 — 想到什么就写下来" /> : (
+        <div className="space-y-2">
+          {data.ideas.map(i => (
+            <div key={i.id} className="flex items-start gap-2 rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
+              <span className="wb-mono text-xs px-2 py-0.5 rounded-full shrink-0 mt-0.5" style={{ backgroundColor: COLORS.contentSoft, color: COLORS.content }}>{i.tag}</span>
+              <div className="wb-body text-sm flex-1" style={{ color: COLORS.ink }}>{i.text}</div>
+              <button onClick={() => remove(i.id)} className="p-1 opacity-60 hover:opacity-100 shrink-0"><IconTrash size={14} color={COLORS.inkSoft} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 潘多拉魔盒 ----------
+function PandoraTab({ data, mutate }) {
+  const [text, setText] = useState("");
+  const add = () => {
+    if (!text.trim()) return;
+    mutate(d => ({ ...d, boxEntries: [{ id: uid(), text: text.trim(), createdAt: Date.now(), triage: null, todoText: null, done: false }, ...d.boxEntries] }));
+    setText("");
+  };
+  const onKeyDown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); } };
+  const remove = (id) => mutate(d => ({ ...d, boxEntries: d.boxEntries.filter(b => b.id !== id) }));
+
+  return (
+    <div>
+      <SectionLabel color={COLORS.daily}>扔进来</SectionLabel>
+      <div className="mb-6">
+        <input value={text} onChange={e => setText(e.target.value)} onKeyDown={onKeyDown}
+          placeholder="做了什么、感受如何、突然冒出的什么念头… 敲回车"
+          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        <div className="wb-mono text-xs mt-2" style={{ color: COLORS.inkSoft }}>不用管它是什么，先记下来。整理在"罗盘指南"里做。</div>
+      </div>
+      <SectionLabel color={COLORS.daily}>记录（{data.boxEntries.length}）</SectionLabel>
+      {data.boxEntries.length === 0 ? <EmptyState text="魔盒是空的 — 上面敲一条试试" /> : (
+        <div className="space-y-2">
+          {data.boxEntries.map(b => (
+            <div key={b.id} className="flex items-start gap-2 rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
+              <div className="flex-1">
+                <div className="wb-body text-sm" style={{ color: COLORS.ink }}>{b.text}</div>
+                <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>
+                  {fmtTime(b.createdAt)}
+                  {b.triage === "todo" && <span className="ml-2" style={{ color: COLORS.coaching }}>→ 已整理为待办</span>}
+                  {b.triage === "thought" && <span className="ml-2">→ 已归类为想法</span>}
+                </div>
+              </div>
+              <button onClick={() => remove(b.id)} className="p-1 opacity-60 hover:opacity-100 shrink-0"><IconTrash size={14} color={COLORS.inkSoft} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 罗盘指南 ----------
+function GuideTab({ data, mutate, apiKey }) {
+  const [busyPlan, setBusyPlan] = useState(false);
+  const [busyTriage, setBusyTriage] = useState(false);
+  const [error, setError] = useState("");
+
+  const untriaged = data.boxEntries.filter(b => !b.triage);
+  const todos = data.boxEntries.filter(b => b.triage === "todo");
+
+  const generatePlan = async () => {
+    setError(""); setBusyPlan(true);
+    try {
+      const list = data.ideas.map(i => `- [${i.tag}] ${i.text}`).join("\n") || "（暂无想法）";
+      const result = await callClaude(
+        "你是帮助内容创作者规划发布节奏的助手。请始终用中文回复，具体到给出大致的发布顺序或时间安排。",
+        `这是目前积累的创作想法：\n${list}\n\n请给出这些想法大致应该按什么顺序、什么时间节奏去发布或处理，哪些该优先。`,
+        apiKey
+      );
+      mutate(d => ({ ...d, publishPlan: { text: result, generatedAt: Date.now() } }));
+    } catch (e) { setError(e.message); } finally { setBusyPlan(false); }
+  };
+
+  const triage = async () => {
+    setError(""); setBusyTriage(true);
+    try {
+      const list = untriaged.map(b => `- id: ${b.id}\n  内容: ${b.text}`).join("\n");
+      const raw = await callClaude(
+        "你是帮助整理个人碎片记录的助手。你会收到若干条随手记下的话，每条有一个id。请判断每一条是「待办事项」（有具体要去做的行动）还是「只是一个想法」（感受、随笔、没有具体行动）。如果是待办事项，尽量保留原文，不需要改写。只返回JSON数组，不要有任何其他文字，格式：[{\"id\":\"xxx\",\"type\":\"todo\",\"text\":\"...\"},{\"id\":\"xxx\",\"type\":\"thought\"}]",
+        `待分类的条目：\n${list}`,
+        apiKey
+      );
+      const parsed = extractJSON(raw);
+      mutate(d => ({
+        ...d,
+        boxEntries: d.boxEntries.map(b => {
+          const match = parsed.find(p => p.id === b.id);
+          if (!match) return b;
+          return match.type === "todo" ? { ...b, triage: "todo", todoText: match.text || b.text } : { ...b, triage: "thought" };
+        }),
+      }));
+    } catch (e) { setError(e.message); } finally { setBusyTriage(false); }
+  };
+
+  const toggleDone = (id) => mutate(d => ({ ...d, boxEntries: d.boxEntries.map(b => b.id === id ? { ...b, done: !b.done } : b) }));
+  const removeTodo = (id) => mutate(d => ({ ...d, boxEntries: d.boxEntries.filter(b => b.id !== id) }));
+
+  return (
+    <div>
+      <SectionLabel color={COLORS.content}>创作发布建议</SectionLabel>
+      <div className="mb-6">
+        <PrimaryButton onClick={generatePlan} disabled={busyPlan} color={COLORS.content} icon={IconSparkles}>生成发布建议</PrimaryButton>
+        {data.publishPlan && <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3 mt-3" style={{ backgroundColor: COLORS.contentSoft, color: COLORS.ink }}>{data.publishPlan.text}</div>}
+      </div>
+
+      <SectionLabel color={COLORS.daily}>整理待办（潘多拉魔盒）</SectionLabel>
+      <div className="mb-3">
+        <PrimaryButton onClick={triage} disabled={busyTriage || untriaged.length === 0} color={COLORS.daily} icon={IconInbox}>
+          {untriaged.length === 0 ? "没有新记录待整理" : `整理 ${untriaged.length} 条新记录`}
+        </PrimaryButton>
+      </div>
+      {error && <div className="wb-body text-sm mb-3" style={{ color: COLORS.daily }}>{error}</div>}
+
+      <div className="mb-6">
+        {todos.length === 0 ? <EmptyState text="还没有待办事项 — 整理一下魔盒里的记录试试" /> : (
+          <div className="space-y-2">
+            {todos.map(t => (
+              <div key={t.id} className="flex items-center gap-2 rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
+                <button onClick={() => toggleDone(t.id)} className="w-5 h-5 rounded-sm border flex items-center justify-center shrink-0"
+                  style={{ borderColor: COLORS.coaching, backgroundColor: t.done ? COLORS.coaching : "transparent" }}>
+                  {t.done && <IconCheck size={13} color={COLORS.paper} />}
+                </button>
+                <div className="wb-body text-sm flex-1" style={{ color: t.done ? COLORS.inkSoft : COLORS.ink, textDecoration: t.done ? "line-through" : "none" }}>{t.todoText || t.text}</div>
+                <button onClick={() => removeTodo(t.id)} className="p-1 opacity-60 hover:opacity-100 shrink-0"><IconTrash size={14} color={COLORS.inkSoft} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <SectionLabel color={COLORS.progress}>累计概览</SectionLabel>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
+          <div className="wb-display text-3xl" style={{ color: COLORS.progress }}>{data.sessions.length}</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>教练会谈</div>
+        </div>
+        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
+          <div className="wb-display text-3xl" style={{ color: COLORS.progress }}>{data.ideas.length}</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>创作想法</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Settings ----------
+function SettingsPanel({ apiKey, setApiKey, onClose }) {
+  const [val, setVal] = useState(apiKey || "");
+  return (
+    <div className="rounded-sm border p-4 mb-6" style={{ borderColor: COLORS.line, backgroundColor: "#fff" }}>
+      <div className="wb-mono text-xs mb-2" style={{ color: COLORS.inkSoft }}>ANTHROPIC API KEY（仅保存在你本机浏览器，不会上传）</div>
+      <div className="flex gap-2">
+        <input type="password" value={val} onChange={e => setVal(e.target.value)} placeholder="sk-ant-..."
+          className="wb-mono flex-1 px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        <button onClick={() => { setApiKey(val); localStorage.setItem(API_KEY_STORAGE, val); onClose(); }}
+          className="wb-body px-4 py-2 text-sm rounded-sm" style={{ backgroundColor: COLORS.ink, color: COLORS.paper }}>保存</button>
+      </div>
+      <div className="wb-body text-xs mt-2" style={{ color: COLORS.inkSoft }}>不填也能用归档/记录/图表功能，只是"AI 总结/生成"这几个按钮需要它。</div>
+    </div>
+  );
+}
+
+// ---------- App ----------
+function App() {
+  const [active, setActive] = useState("coaching");
+  const [data, setData] = useState(emptyData());
+  const [apiKey, setApiKey] = useState("");
+  const [showSettings, setShowSettings] = useState(false);
+
+  useEffect(() => { setData(loadData()); setApiKey(localStorage.getItem(API_KEY_STORAGE) || ""); }, []);
+  const mutate = useCallback((updater) => { setData(prev => { const next = updater(prev); saveData(next); return next; }); }, []);
+
+  return (
+    <div className="min-h-screen wb-body" style={{ backgroundColor: COLORS.paper }}>
+      <div className="max-w-3xl mx-auto px-4 py-6">
+        <header className="mb-6 flex items-start justify-between">
+          <div>
+            <div className="wb-display text-2xl" style={{ color: COLORS.ink }}>执业工作台</div>
+            <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>coaching · content · pandora · guide</div>
+          </div>
+          <button onClick={() => setShowSettings(s => !s)} className="p-2"><IconGear size={18} color={COLORS.inkSoft} /></button>
+        </header>
+        {showSettings && <SettingsPanel apiKey={apiKey} setApiKey={setApiKey} onClose={() => setShowSettings(false)} />}
+        <nav className="flex gap-1 mb-6 border-b" style={{ borderColor: COLORS.line }}>
+          {TABS.map(t => {
+            const Ico = t.icon; const isActive = t.key === active;
+            return (
+              <button key={t.key} onClick={() => setActive(t.key)} className="wb-body flex-1 flex flex-col items-center gap-1 pb-2 pt-1 text-xs relative"
+                style={{ color: isActive ? t.color : COLORS.inkSoft }}>
+                <Ico size={17} /><span>{t.label}</span>
+                {isActive && <span className="absolute -bottom-px left-0 right-0 h-0.5" style={{ backgroundColor: t.color }} />}
+              </button>
+            );
+          })}
+        </nav>
+        <main>
+          {active === "coaching" && <CoachingTab data={data} mutate={mutate} apiKey={apiKey} />}
+          {active === "content" && <ContentTab data={data} mutate={mutate} />}
+          {active === "box" && <PandoraTab data={data} mutate={mutate} />}
+          {active === "guide" && <GuideTab data={data} mutate={mutate} apiKey={apiKey} />}
+        </main>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+<script>
+  (function () {
+    var source = document.getElementById("app-source").textContent;
+    try {
+      var compiled = Babel.transform(source, { presets: [["react", { runtime: "classic" }]] }).code;
+      (0, eval)(compiled);
+    } catch (e) {
+      document.getElementById("root").innerHTML =
+        '<pre style="white-space:pre-wrap;padding:20px;color:#a15242;font-family:monospace;">加载出错：' +
+        (e && e.message ? e.message : e) + '</pre>';
+    }
+  })();
+</script>
+</body>
+</html>
