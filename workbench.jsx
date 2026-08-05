@@ -2,12 +2,12 @@ import React, { useState, useEffect, useCallback } from "react";
 import {
   NotebookPen,
   Sparkles,
+  ListChecks,
   Inbox,
-  Compass,
+  Wand2,
   Plus,
   Trash2,
   Loader2,
-  Check,
 } from "lucide-react";
 
 // ---------- design tokens ----------
@@ -28,13 +28,15 @@ const COLORS = {
 };
 
 const TABS = [
-  { key: "coaching", label: "教练日志", icon: NotebookPen, color: COLORS.coaching, soft: COLORS.coachingSoft },
-  { key: "content", label: "创作火花", icon: Sparkles, color: COLORS.content, soft: COLORS.contentSoft },
-  { key: "box", label: "潘多拉魔盒", icon: Inbox, color: COLORS.daily, soft: COLORS.dailySoft },
-  { key: "guide", label: "罗盘指南", icon: Compass, color: COLORS.progress, soft: COLORS.progressSoft },
+  { key: "coaching", label: "教练日志", icon: NotebookPen, color: COLORS.coaching },
+  { key: "content", label: "创作火花", icon: Sparkles, color: COLORS.content },
+  { key: "box", label: "待办事项", icon: ListChecks, color: COLORS.daily },
+  { key: "guide", label: "潘多拉魔盒", icon: Inbox, color: COLORS.progress },
 ];
 
 const STORAGE_KEY = "workbench-data";
+const ACC_CUTOFF = "2026-07-10";
+const CONTENT_TAGS = ["自媒体", "播客", "其他"];
 
 const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 const todayISO = () => new Date().toISOString().slice(0, 10);
@@ -42,22 +44,20 @@ const fmtDate = (iso) => {
   try {
     const d = new Date(iso + "T00:00:00");
     return d.toLocaleDateString("zh-CN", { month: "2-digit", day: "2-digit", weekday: "short" });
-  } catch {
-    return iso;
-  }
+  } catch { return iso; }
 };
 const fmtTime = (ts) => {
   try { return new Date(ts).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }); }
   catch { return ""; }
 };
 
-async function callClaude(system, user) {
+async function callClaude(system, user, maxTokens) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-6",
-      max_tokens: 1500,
+      max_tokens: maxTokens || 1200,
       system,
       messages: [{ role: "user", content: user }],
     }),
@@ -73,32 +73,36 @@ async function callClaude(system, user) {
   return text;
 }
 
-function extractJSON(text) {
-  const cleaned = text.replace(/```json/g, "").replace(/```/g, "").trim();
-  const start = cleaned.indexOf("[");
-  const end = cleaned.lastIndexOf("]");
-  if (start === -1 || end === -1) throw new Error("没能解析出结果");
-  return JSON.parse(cleaned.slice(start, end + 1));
-}
-
-const emptyData = () => ({ sessions: [], ideas: [], boxEntries: [], publishPlan: null });
+const emptyData = () => ({ sessions: [], ideas: [], todoEntries: [], pandoraEntries: [], coachingOverview: null, boxReflection: null });
 
 // migrate older shapes so existing data isn't lost
 function migrate(d) {
   const next = { ...emptyData(), ...d };
-  if (!Array.isArray(next.boxEntries)) next.boxEntries = [];
-  if (Array.isArray(d.dailyLogs) && d.dailyLogs.length && !d.boxEntries.length) {
-    next.boxEntries = d.dailyLogs.map((l) => ({
-      id: l.id || uid(),
-      text: l.note || l.nextStep || "",
-      createdAt: l.createdAt || Date.now(),
-      triage: null,
-      todoText: null,
-      done: false,
-    }));
+
+  // old shared "boxEntries" -> becomes todoEntries (that's where her real entries like "zinnia的牙医" live)
+  if (Array.isArray(d.boxEntries) && !Array.isArray(d.todoEntries)) {
+    next.todoEntries = d.boxEntries;
   }
-  next.boxEntries = next.boxEntries.map((e) => ({ triage: null, todoText: null, done: false, ...e }));
-  if (!("publishPlan" in next)) next.publishPlan = d.progressOverview || null;
+  if (!Array.isArray(next.todoEntries)) next.todoEntries = [];
+  if (!Array.isArray(next.pandoraEntries)) next.pandoraEntries = [];
+  if (Array.isArray(d.dailyLogs) && d.dailyLogs.length && !next.todoEntries.length) {
+    next.todoEntries = d.dailyLogs.map((l) => ({ id: l.id || uid(), text: l.note || l.nextStep || "", createdAt: l.createdAt || Date.now() }));
+  }
+  next.todoEntries = next.todoEntries.map((e) => ({ text: "", createdAt: Date.now(), done: false, ...e }));
+  next.pandoraEntries = next.pandoraEntries.map((e) => ({ text: "", createdAt: Date.now(), ...e }));
+
+  next.sessions = (next.sessions || []).map((s) => {
+    const transcript = s.transcript !== undefined ? s.transcript : (s.notes || "");
+    return { hours: 1, paymentType: "paid", clientSummary: "", ...s, transcript };
+  });
+
+  next.ideas = (next.ideas || []).map((i) => {
+    if (i.title !== undefined) return { appendix: "", content: "", ...i, tag: i.tag === "脑洞" ? "播客" : i.tag };
+    return { id: i.id, tag: i.tag === "脑洞" ? "播客" : (i.tag || "其他"), title: i.text || "", content: "", appendix: "", createdAt: i.createdAt || Date.now() };
+  });
+
+  if (!("coachingOverview" in next)) next.coachingOverview = null;
+  if (!("boxReflection" in next)) next.boxReflection = null;
   return next;
 }
 
@@ -126,24 +130,44 @@ function PrimaryButton({ onClick, disabled, children, color, icon: Icon }) {
     </button>
   );
 }
-function EmptyState({ text, color }) {
+function EmptyState({ text }) {
   return <div className="wb-body text-sm py-8 text-center rounded-sm border border-dashed" style={{ color: COLORS.inkSoft, borderColor: COLORS.line }}>{text}</div>;
 }
+function PillButton({ active, onClick, children, color, soft }) {
+  return (
+    <button onClick={onClick} className="wb-mono text-xs px-2.5 py-1 rounded-full border"
+      style={{ borderColor: active ? color : COLORS.line, backgroundColor: active ? soft : "transparent", color: active ? color : COLORS.inkSoft }}>
+      {children}
+    </button>
+  );
+}
 
-// ---------- Coaching tab (unchanged) ----------
+// ---------- Coaching tab ----------
 function CoachingTab({ data, mutate }) {
   const [client, setClient] = useState("");
   const [date, setDate] = useState(todayISO());
-  const [notes, setNotes] = useState("");
+  const [hours, setHours] = useState("1");
+  const [paymentType, setPaymentType] = useState("paid");
+  const [transcript, setTranscript] = useState("");
+  const [clientSummary, setClientSummary] = useState("");
   const [busyId, setBusyId] = useState(null);
+  const [busyOverview, setBusyOverview] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState({});
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
+  const [filter, setFilter] = useState("全部");
 
   const addSession = () => {
-    if (!notes.trim()) return;
-    const entry = { id: uid(), client: client.trim() || "未命名来访者", date, notes: notes.trim(), summary: null, createdAt: Date.now() };
+    if (!transcript.trim()) return;
+    const entry = {
+      id: uid(), client: client.trim() || "未命名来访者", date,
+      hours: parseFloat(hours) || 0, paymentType,
+      transcript: transcript.trim(), clientSummary: clientSummary.trim(),
+      summary: null, createdAt: Date.now(),
+    };
     mutate((d) => ({ ...d, sessions: [entry, ...d.sessions] }));
-    setClient(""); setNotes(""); setDate(todayISO());
+    setClient(""); setTranscript(""); setClientSummary(""); setDate(todayISO()); setHours("1"); setPaymentType("paid");
   };
 
   const summarize = async (session) => {
@@ -151,13 +175,50 @@ function CoachingTab({ data, mutate }) {
     try {
       const summary = await callClaude(
         "你是一位经验丰富的教练督导（coaching supervisor），帮助教练复盘单次会谈。请始终用中文回复，语气直接、具体、有建设性，避免空泛的鼓励。",
-        `以下是一次教练对话的记录或笔记（来访者：${session.client}，日期：${session.date}）：\n\n${session.notes}\n\n请按以下结构给出简短复盘（每部分2-4句即可）：\n1. 这次教练做得好的地方\n2. 可以提升的地方\n3. 来访者的核心议题与可能的反馈/收获`
+        `以下是一次教练对话的记录或笔记（来访者：${session.client}，日期：${session.date}）：\n\n${session.transcript}\n\n请按以下结构给出简短复盘（每部分2-4句即可）：\n1. 这次教练做得好的地方\n2. 可以提升的地方\n3. 来访者的核心议题与可能的反馈/收获`
       );
       mutate((d) => ({ ...d, sessions: d.sessions.map((s) => (s.id === session.id ? { ...s, summary } : s)) }));
       setExpanded((e) => ({ ...e, [session.id]: true }));
     } catch (e) { setError(e.message || "生成失败，请重试"); } finally { setBusyId(null); }
   };
+
+  const generateOverview = async () => {
+    setError(""); setBusyOverview(true);
+    try {
+      const list = [...data.sessions].reverse()
+        .map((s) => `- ${s.date} ${s.client}：${s.summary || s.transcript}`)
+        .join("\n") || "（暂无记录）";
+      const result = await callClaude(
+        "你是一位教练成长顾问，帮助教练回顾一段时间以来所有的会谈记录，梳理成长脉络。请始终用中文回复，具体、有洞察力，避免空泛的鼓励话术。",
+        `以下是我目前所有的教练会谈记录（按时间顺序）：\n\n${list}\n\n请帮我梳理：\n1. 整体上我在哪些方面明显进步了\n2. 我比较擅长的技能/风格是什么\n3. 我还需要继续提升的地方是什么`,
+        1500
+      );
+      mutate((d) => ({ ...d, coachingOverview: { text: result, generatedAt: Date.now() } }));
+    } catch (e) { setError(e.message || "生成失败，请重试"); } finally { setBusyOverview(false); }
+  };
+
   const remove = (id) => mutate((d) => ({ ...d, sessions: d.sessions.filter((s) => s.id !== id) }));
+
+  const startEdit = (s) => { setEditingId(s.id); setEditDraft({ ...s }); };
+  const saveEdit = () => {
+    mutate((d) => ({ ...d, sessions: d.sessions.map((s) => (s.id === editDraft.id ? { ...editDraft, hours: parseFloat(editDraft.hours) || 0 } : s)) }));
+    setEditingId(null); setEditDraft(null);
+  };
+
+  const countedSessions = data.sessions.filter((s) => s.date >= ACC_CUTOFF);
+  const totalHours = countedSessions.reduce((sum, s) => sum + (s.hours || 0), 0);
+  const paidHours = countedSessions.filter((s) => s.paymentType === "paid").reduce((sum, s) => sum + (s.hours || 0), 0);
+  const proBonoHours = countedSessions.filter((s) => s.paymentType === "pro_bono").reduce((sum, s) => sum + (s.hours || 0), 0);
+  const countedProBono = Math.min(proBonoHours, 25);
+  const countableTotal = paidHours + countedProBono;
+  const hoursToGo = Math.max(0, 100 - countableTotal);
+  const paidGap = Math.max(0, 75 - paidHours);
+
+  const filteredSessions = data.sessions.filter((s) => {
+    if (filter === "全部") return true;
+    if (filter === "付费") return s.paymentType === "paid";
+    return s.paymentType === "pro_bono";
+  });
 
   return (
     <div>
@@ -169,34 +230,235 @@ function CoachingTab({ data, mutate }) {
           <input type="date" value={date} onChange={(e) => setDate(e.target.value)}
             className="wb-mono px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
         </div>
-        <textarea value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="粘贴录音转写、笔记或回忆要点…" rows={4}
+        <div className="flex gap-2 items-center flex-wrap">
+          <input type="number" step="0.5" min="0" value={hours} onChange={(e) => setHours(e.target.value)}
+            className="wb-mono w-24 px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+          <span className="wb-mono text-xs" style={{ color: COLORS.inkSoft }}>小时</span>
+          <div className="flex-1" />
+          <PillButton active={paymentType === "paid"} onClick={() => setPaymentType("paid")} color={COLORS.coaching} soft={COLORS.coachingSoft}>付费</PillButton>
+          <PillButton active={paymentType === "pro_bono"} onClick={() => setPaymentType("pro_bono")} color={COLORS.coaching} soft={COLORS.coachingSoft}>Pro Bono</PillButton>
+        </div>
+        <textarea value={transcript} onChange={(e) => setTranscript(e.target.value)} placeholder="语音转写…" rows={4}
           className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        {paymentType === "paid" && (
+          <textarea value={clientSummary} onChange={(e) => setClientSummary(e.target.value)} placeholder="发给客户的总结（可选）" rows={3}
+            className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+        )}
         <PrimaryButton onClick={addSession} color={COLORS.coaching} icon={Plus}>归档</PrimaryButton>
       </div>
+
       {error && <div className="wb-body text-sm mb-3" style={{ color: COLORS.daily }}>{error}</div>}
-      <SectionLabel color={COLORS.coaching}>会谈记录（{data.sessions.length}）</SectionLabel>
-      {data.sessions.length === 0 ? <EmptyState text="还没有记录 — 上面归档你的第一次会谈" /> : (
-        <div className="space-y-3">
-          {data.sessions.map((s) => (
+
+      <div className="flex items-center gap-2 mb-3">
+        <SectionLabel color={COLORS.coaching}>会谈记录（{filteredSessions.length}）</SectionLabel>
+      </div>
+      <div className="flex items-center gap-2 flex-wrap mb-3">
+        {["全部", "付费", "Pro Bono"].map((f) => (
+          <PillButton key={f} active={filter === f} onClick={() => setFilter(f)} color={COLORS.coaching} soft={COLORS.coachingSoft}>{f}</PillButton>
+        ))}
+      </div>
+      {filteredSessions.length === 0 ? <EmptyState text="没有符合条件的记录" /> : (
+        <div className="space-y-3 mb-8">
+          {filteredSessions.map((s) => (
             <div key={s.id} className="rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <div className="wb-display text-base" style={{ color: COLORS.ink }}>{s.client}</div>
-                  <div className="wb-mono text-xs mt-0.5" style={{ color: COLORS.inkSoft }}>{fmtDate(s.date)}</div>
+              {editingId === s.id ? (
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <input value={editDraft.client} onChange={(e) => setEditDraft({ ...editDraft, client: e.target.value })}
+                      className="wb-body flex-1 px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                    <input type="date" value={editDraft.date} onChange={(e) => setEditDraft({ ...editDraft, date: e.target.value })}
+                      className="wb-mono px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                  </div>
+                  <div className="flex gap-2 items-center flex-wrap">
+                    <input type="number" step="0.5" min="0" value={editDraft.hours} onChange={(e) => setEditDraft({ ...editDraft, hours: e.target.value })}
+                      className="wb-mono w-24 px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                    <span className="wb-mono text-xs" style={{ color: COLORS.inkSoft }}>小时</span>
+                    <div className="flex-1" />
+                    <PillButton active={editDraft.paymentType === "paid"} onClick={() => setEditDraft({ ...editDraft, paymentType: "paid" })} color={COLORS.coaching} soft={COLORS.coachingSoft}>付费</PillButton>
+                    <PillButton active={editDraft.paymentType === "pro_bono"} onClick={() => setEditDraft({ ...editDraft, paymentType: "pro_bono" })} color={COLORS.coaching} soft={COLORS.coachingSoft}>Pro Bono</PillButton>
+                  </div>
+                  <textarea value={editDraft.transcript} onChange={(e) => setEditDraft({ ...editDraft, transcript: e.target.value })} rows={4}
+                    className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                  {editDraft.paymentType === "paid" && (
+                    <textarea value={editDraft.clientSummary} onChange={(e) => setEditDraft({ ...editDraft, clientSummary: e.target.value })} rows={3}
+                      placeholder="发给客户的总结"
+                      className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                  )}
+                  <div className="flex gap-2">
+                    <PrimaryButton onClick={saveEdit} color={COLORS.coaching}>保存</PrimaryButton>
+                    <button onClick={() => { setEditingId(null); setEditDraft(null); }} className="wb-mono text-xs px-3" style={{ color: COLORS.inkSoft }}>取消</button>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {!s.summary && <PrimaryButton onClick={() => summarize(s)} disabled={busyId === s.id} color={COLORS.coaching}>AI 总结</PrimaryButton>}
-                  <button onClick={() => remove(s.id)} className="p-1.5 opacity-60 hover:opacity-100"><Trash2 size={15} color={COLORS.inkSoft} /></button>
-                  <button onClick={() => setExpanded((e) => ({ ...e, [s.id]: !e[s.id] }))} className="wb-mono text-xs px-2 py-1" style={{ color: COLORS.inkSoft }}>
-                    {expanded[s.id] ? "收起" : "展开"}
-                  </button>
+              ) : (
+                <>
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="wb-display text-base" style={{ color: COLORS.ink }}>{s.client}</div>
+                      <div className="wb-mono text-xs mt-0.5" style={{ color: COLORS.inkSoft }}>
+                        {fmtDate(s.date)} · {s.hours}h · {s.paymentType === "paid" ? "付费" : "Pro Bono"}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {!s.summary && <PrimaryButton onClick={() => summarize(s)} disabled={busyId === s.id} color={COLORS.coaching}>AI 总结</PrimaryButton>}
+                      <button onClick={() => startEdit(s)} className="wb-mono text-xs px-2 py-1" style={{ color: COLORS.inkSoft }}>更改</button>
+                      <button onClick={() => remove(s.id)} className="p-1.5 opacity-60 hover:opacity-100"><Trash2 size={15} color={COLORS.inkSoft} /></button>
+                      <button onClick={() => setExpanded((e) => ({ ...e, [s.id]: !e[s.id] }))} className="wb-mono text-xs px-2 py-1" style={{ color: COLORS.inkSoft }}>
+                        {expanded[s.id] ? "收起" : "展开"}
+                      </button>
+                    </div>
+                  </div>
+                  {expanded[s.id] && (
+                    <div className="mt-3 space-y-3">
+                      {s.summary && (
+                        <div>
+                          <div className="wb-mono text-xs mb-1" style={{ color: COLORS.inkSoft }}>AI 督导总结</div>
+                          <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3" style={{ backgroundColor: COLORS.coachingSoft, color: COLORS.ink }}>{s.summary}</div>
+                        </div>
+                      )}
+                      {s.clientSummary && (
+                        <div>
+                          <div className="wb-mono text-xs mb-1" style={{ color: COLORS.inkSoft }}>发给客户的总结</div>
+                          <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3" style={{ backgroundColor: COLORS.paperDeep, color: COLORS.ink }}>{s.clientSummary}</div>
+                        </div>
+                      )}
+                      <details><summary className="wb-mono text-xs cursor-pointer" style={{ color: COLORS.inkSoft }}>语音转写</summary>
+                        <div className="wb-body text-sm mt-2 whitespace-pre-wrap" style={{ color: COLORS.inkSoft }}>{s.transcript}</div></details>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <SectionLabel color={COLORS.coaching}>整体成长脉络</SectionLabel>
+      <div className="mb-6">
+        <PrimaryButton onClick={generateOverview} disabled={busyOverview || data.sessions.length === 0} color={COLORS.coaching} icon={Sparkles}>
+          AI 总结全部会谈
+        </PrimaryButton>
+        {data.coachingOverview && (
+          <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3 mt-3" style={{ backgroundColor: COLORS.coachingSoft, color: COLORS.ink }}>
+            {data.coachingOverview.text}
+          </div>
+        )}
+      </div>
+
+      <SectionLabel color={COLORS.coaching}>累计概览</SectionLabel>
+      <div className="wb-mono text-xs mb-3" style={{ color: COLORS.inkSoft }}>只计入 {ACC_CUTOFF} 及以后的会谈</div>
+      <div className="grid grid-cols-2 gap-3 mb-3">
+        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
+          <div className="wb-display text-3xl" style={{ color: COLORS.coaching }}>{countedSessions.length}</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>累计场次</div>
+        </div>
+        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
+          <div className="wb-display text-3xl" style={{ color: COLORS.coaching }}>{totalHours}</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>累计小时</div>
+        </div>
+        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
+          <div className="wb-display text-3xl" style={{ color: COLORS.coaching }}>{paidHours}</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>付费小时</div>
+        </div>
+        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
+          <div className="wb-display text-3xl" style={{ color: COLORS.coaching }}>{proBonoHours}</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>Pro Bono 小时</div>
+        </div>
+      </div>
+      <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line, backgroundColor: COLORS.coachingSoft }}>
+        <div className="wb-body text-sm" style={{ color: COLORS.ink }}>
+          ACC 认证进度：已计入 <b>{countableTotal}</b> / 100 小时（付费 {paidHours}/75，Pro Bono {countedProBono}/25 封顶）
+        </div>
+        <div className="wb-body text-sm mt-1" style={{ color: COLORS.ink }}>
+          距离 100 小时还差 <b>{hoursToGo}</b> 小时{paidGap > 0 ? `（其中付费小时还差 ${paidGap} 小时）` : ""}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Content tab ----------
+function ContentTab({ data, mutate }) {
+  const [subTab, setSubTab] = useState(CONTENT_TAGS[0]);
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [appendix, setAppendix] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState(null);
+
+  const add = () => {
+    if (!title.trim() || subTab === "所有") return;
+    mutate((d) => ({
+      ...d,
+      ideas: [{ id: uid(), tag: subTab, title: title.trim(), content: content.trim(), appendix: appendix.trim(), createdAt: Date.now() }, ...d.ideas],
+    }));
+    setTitle(""); setContent(""); setAppendix("");
+  };
+  const remove = (id) => mutate((d) => ({ ...d, ideas: d.ideas.filter((i) => i.id !== id) }));
+  const startEdit = (i) => { setEditingId(i.id); setEditDraft({ ...i }); };
+  const saveEdit = () => {
+    mutate((d) => ({ ...d, ideas: d.ideas.map((i) => (i.id === editDraft.id ? editDraft : i)) }));
+    setEditingId(null); setEditDraft(null);
+  };
+
+  const filtered = subTab === "所有" ? data.ideas : data.ideas.filter((i) => i.tag === subTab);
+
+  return (
+    <div>
+      <div className="flex items-center gap-2 flex-wrap mb-6">
+        {[...CONTENT_TAGS, "所有"].map((t) => (
+          <PillButton key={t} active={subTab === t} onClick={() => setSubTab(t)} color={COLORS.content} soft={COLORS.contentSoft}>{t}</PillButton>
+        ))}
+      </div>
+
+      {subTab === "所有" ? (
+        <div className="wb-body text-xs mb-6 rounded-sm border border-dashed p-3" style={{ color: COLORS.inkSoft, borderColor: COLORS.line }}>
+          "所有"只用来浏览 — 切换到具体分类才能记新想法
+        </div>
+      ) : (
+        <div className="space-y-2 mb-6">
+          <SectionLabel color={COLORS.content}>记一个{subTab}想法</SectionLabel>
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="标题"
+            className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+          <textarea value={content} onChange={(e) => setContent(e.target.value)} placeholder="内容（可选）" rows={3}
+            className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+          <textarea value={appendix} onChange={(e) => setAppendix(e.target.value)} placeholder="附注 / appendix（可选）" rows={2}
+            className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+          <PrimaryButton onClick={add} color={COLORS.content} icon={Plus}>记下来</PrimaryButton>
+        </div>
+      )}
+
+      <SectionLabel color={COLORS.content}>{subTab}（{filtered.length}）</SectionLabel>
+      {filtered.length === 0 ? <EmptyState text="这里还没有想法" /> : (
+        <div className="space-y-2">
+          {filtered.map((i) => (
+            <div key={i.id} className="rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
+              {editingId === i.id ? (
+                <div className="space-y-2">
+                  <input value={editDraft.title} onChange={(e) => setEditDraft({ ...editDraft, title: e.target.value })}
+                    className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                  <textarea value={editDraft.content} onChange={(e) => setEditDraft({ ...editDraft, content: e.target.value })} rows={3}
+                    className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                  <textarea value={editDraft.appendix} onChange={(e) => setEditDraft({ ...editDraft, appendix: e.target.value })} rows={2}
+                    className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
+                  <div className="flex gap-2">
+                    <PrimaryButton onClick={saveEdit} color={COLORS.content}>保存</PrimaryButton>
+                    <button onClick={() => { setEditingId(null); setEditDraft(null); }} className="wb-mono text-xs px-3" style={{ color: COLORS.inkSoft }}>取消</button>
+                  </div>
                 </div>
-              </div>
-              {expanded[s.id] && (
-                <div className="mt-3 space-y-3">
-                  {s.summary && <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3" style={{ backgroundColor: COLORS.coachingSoft, color: COLORS.ink }}>{s.summary}</div>}
-                  <details><summary className="wb-mono text-xs cursor-pointer" style={{ color: COLORS.inkSoft }}>原始笔记</summary>
-                    <div className="wb-body text-sm mt-2 whitespace-pre-wrap" style={{ color: COLORS.inkSoft }}>{s.notes}</div></details>
+              ) : (
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="wb-mono text-xs px-2 py-0.5 rounded-full" style={{ backgroundColor: COLORS.contentSoft, color: COLORS.content }}>{i.tag}</span>
+                      <div className="wb-display text-base" style={{ color: COLORS.ink }}>{i.title}</div>
+                    </div>
+                    {i.content && <div className="wb-body text-sm mt-1" style={{ color: COLORS.ink }}>{i.content}</div>}
+                    {i.appendix && <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>{i.appendix}</div>}
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => startEdit(i)} className="wb-mono text-xs px-2 py-1" style={{ color: COLORS.inkSoft }}>更改</button>
+                    <button onClick={() => remove(i.id)} className="p-1 opacity-60 hover:opacity-100"><Trash2 size={14} color={COLORS.inkSoft} /></button>
+                  </div>
                 </div>
               )}
             </div>
@@ -207,35 +469,59 @@ function CoachingTab({ data, mutate }) {
   );
 }
 
-// ---------- Content tab (unchanged) ----------
-const CONTENT_TAGS = ["自媒体", "脑洞", "其他"];
-function ContentTab({ data, mutate }) {
-  const [text, setText] = useState(""); const [tag, setTag] = useState(CONTENT_TAGS[0]);
-  const add = () => { if (!text.trim()) return; mutate((d) => ({ ...d, ideas: [{ id: uid(), text: text.trim(), tag, createdAt: Date.now() }, ...d.ideas] })); setText(""); };
-  const remove = (id) => mutate((d) => ({ ...d, ideas: d.ideas.filter((i) => i.id !== id) }));
+// ---------- 待办事项: capture + edit / complete / delete ----------
+function TodoTab({ data, mutate }) {
+  const [text, setText] = useState("");
+  const [editingId, setEditingId] = useState(null);
+  const [editText, setEditText] = useState("");
+
+  const add = () => {
+    if (!text.trim()) return;
+    mutate((d) => ({ ...d, todoEntries: [{ id: uid(), text: text.trim(), createdAt: Date.now(), done: false }, ...d.todoEntries] }));
+    setText("");
+  };
+  const onKeyDown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); } };
+  const remove = (id) => mutate((d) => ({ ...d, todoEntries: d.todoEntries.filter((b) => b.id !== id) }));
+  const toggleDone = (id) => mutate((d) => ({ ...d, todoEntries: d.todoEntries.map((b) => (b.id === id ? { ...b, done: !b.done } : b)) }));
+  const startEdit = (b) => { setEditingId(b.id); setEditText(b.text); };
+  const saveEdit = (id) => {
+    mutate((d) => ({ ...d, todoEntries: d.todoEntries.map((b) => (b.id === id ? { ...b, text: editText.trim() || b.text } : b)) }));
+    setEditingId(null); setEditText("");
+  };
+
   return (
     <div>
-      <SectionLabel color={COLORS.content}>随手记一个想法</SectionLabel>
-      <div className="space-y-2 mb-6">
-        <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="自媒体选题、脑洞、随便想聊的什么…" rows={3}
-          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none resize-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
-        <div className="flex items-center gap-2 flex-wrap">
-          {CONTENT_TAGS.map((t) => (
-            <button key={t} onClick={() => setTag(t)} className="wb-mono text-xs px-2.5 py-1 rounded-full border"
-              style={{ borderColor: tag === t ? COLORS.content : COLORS.line, backgroundColor: tag === t ? COLORS.contentSoft : "transparent", color: tag === t ? COLORS.content : COLORS.inkSoft }}>{t}</button>
-          ))}
-          <div className="flex-1" />
-          <PrimaryButton onClick={add} color={COLORS.content} icon={Plus}>记下来</PrimaryButton>
-        </div>
+      <SectionLabel color={COLORS.daily}>记一条待办</SectionLabel>
+      <div className="mb-6">
+        <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKeyDown}
+          placeholder="要做的事情… 敲回车"
+          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
       </div>
-      <SectionLabel color={COLORS.content}>想法清单（{data.ideas.length}）</SectionLabel>
-      {data.ideas.length === 0 ? <EmptyState text="脑洞还是空的 — 想到什么就写下来" /> : (
+      <SectionLabel color={COLORS.daily}>记录（{data.todoEntries.length}）</SectionLabel>
+      {data.todoEntries.length === 0 ? <EmptyState text="还是空的 — 上面敲一条试试" /> : (
         <div className="space-y-2">
-          {data.ideas.map((i) => (
-            <div key={i.id} className="flex items-start gap-2 rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
-              <span className="wb-mono text-xs px-2 py-0.5 rounded-full shrink-0 mt-0.5" style={{ backgroundColor: COLORS.contentSoft, color: COLORS.content }}>{i.tag}</span>
-              <div className="wb-body text-sm flex-1" style={{ color: COLORS.ink }}>{i.text}</div>
-              <button onClick={() => remove(i.id)} className="p-1 opacity-60 hover:opacity-100 shrink-0"><Trash2 size={14} color={COLORS.inkSoft} /></button>
+          {data.todoEntries.map((b) => (
+            <div key={b.id} className="rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
+              {editingId === b.id ? (
+                <div className="flex gap-2">
+                  <input value={editText} onChange={(e) => setEditText(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") saveEdit(b.id); }}
+                    className="wb-body flex-1 px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} autoFocus />
+                  <PrimaryButton onClick={() => saveEdit(b.id)} color={COLORS.daily}>保存</PrimaryButton>
+                </div>
+              ) : (
+                <div className="flex items-start gap-2">
+                  <div className="flex-1">
+                    <div className="wb-body text-sm" style={{ color: b.done ? COLORS.inkSoft : COLORS.ink, textDecoration: b.done ? "line-through" : "none" }}>{b.text}</div>
+                    <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>{fmtTime(b.createdAt)}</div>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button onClick={() => startEdit(b)} className="wb-mono text-xs px-2 py-1" style={{ color: COLORS.inkSoft }}>更改</button>
+                    <button onClick={() => toggleDone(b.id)} className="wb-mono text-xs px-2 py-1" style={{ color: b.done ? COLORS.coaching : COLORS.inkSoft }}>{b.done ? "已完成" : "完成"}</button>
+                    <button onClick={() => remove(b.id)} className="p-1.5 opacity-60 hover:opacity-100"><Trash2 size={14} color={COLORS.inkSoft} /></button>
+                  </div>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -244,153 +530,68 @@ function ContentTab({ data, mutate }) {
   );
 }
 
-// ---------- 潘多拉魔盒: pure fast capture, no AI at write time ----------
+// ---------- 潘多拉魔盒: independent free-form capture + creative reflection ----------
 function PandoraTab({ data, mutate }) {
   const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
   const add = () => {
     if (!text.trim()) return;
-    mutate((d) => ({ ...d, boxEntries: [{ id: uid(), text: text.trim(), createdAt: Date.now(), triage: null, todoText: null, done: false }, ...d.boxEntries] }));
+    mutate((d) => ({ ...d, pandoraEntries: [{ id: uid(), text: text.trim(), createdAt: Date.now() }, ...d.pandoraEntries] }));
     setText("");
   };
-  const onKeyDown = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); }
+  const onKeyDown = (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); add(); } };
+  const remove = (id) => mutate((d) => ({ ...d, pandoraEntries: d.pandoraEntries.filter((b) => b.id !== id) }));
+
+  const reflect = async () => {
+    setError(""); setBusy(true);
+    try {
+      const list = data.pandoraEntries.map((b) => `- ${b.text}`).join("\n") || "（暂无记录）";
+      const result = await callClaude(
+        "你是一个善于从零碎念头里发现有趣东西的伙伴。请始终用中文回复，语气轻松、有洞察，不要写成待办清单，也不要泛泛而谈。",
+        `这是我随手记下的一堆天马行空的念头：\n\n${list}\n\n不用整理成待办事项。请聊一聊：\n1. 这些念头里有意思的部分是什么\n2. 从中能看出我身上什么样的特质，未来可以往哪个方向延展\n3. 顺带丢给我一些不一定有用但挺有意思的知识拓展`,
+        1500
+      );
+      mutate((d) => ({ ...d, boxReflection: { text: result, generatedAt: Date.now() } }));
+    } catch (e) { setError(e.message || "生成失败，请重试"); } finally { setBusy(false); }
   };
-  const remove = (id) => mutate((d) => ({ ...d, boxEntries: d.boxEntries.filter((b) => b.id !== id) }));
 
   return (
     <div>
-      <SectionLabel color={COLORS.daily}>扔进来</SectionLabel>
+      <SectionLabel color={COLORS.progress}>扔进来</SectionLabel>
       <div className="mb-6">
-        <input
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={onKeyDown}
-          placeholder="做了什么、感受如何、突然冒出的什么念头… 敲回车"
-          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none"
-          style={{ borderColor: COLORS.line, color: COLORS.ink }}
-        />
-        <div className="wb-mono text-xs mt-2" style={{ color: COLORS.inkSoft }}>不用管它是什么，先记下来。整理在"罗盘指南"里做。</div>
+        <input value={text} onChange={(e) => setText(e.target.value)} onKeyDown={onKeyDown}
+          placeholder="天马行空的想象力，什么都行… 敲回车"
+          className="wb-body w-full px-3 py-2 text-sm rounded-sm border bg-transparent outline-none" style={{ borderColor: COLORS.line, color: COLORS.ink }} />
       </div>
-      <SectionLabel color={COLORS.daily}>记录（{data.boxEntries.length}）</SectionLabel>
-      {data.boxEntries.length === 0 ? <EmptyState text="魔盒是空的 — 上面敲一条试试" /> : (
-        <div className="space-y-2">
-          {data.boxEntries.map((b) => (
+
+      <SectionLabel color={COLORS.progress}>记录（{data.pandoraEntries.length}）</SectionLabel>
+      {data.pandoraEntries.length === 0 ? <EmptyState text="还是空的 — 上面敲一条试试" /> : (
+        <div className="space-y-2 mb-6">
+          {data.pandoraEntries.map((b) => (
             <div key={b.id} className="flex items-start gap-2 rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
               <div className="flex-1">
                 <div className="wb-body text-sm" style={{ color: COLORS.ink }}>{b.text}</div>
-                <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>
-                  {fmtTime(b.createdAt)}
-                  {b.triage === "todo" && <span className="ml-2" style={{ color: COLORS.coaching }}>→ 已整理为待办</span>}
-                  {b.triage === "thought" && <span className="ml-2">→ 已归类为想法</span>}
-                </div>
+                <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>{fmtTime(b.createdAt)}</div>
               </div>
               <button onClick={() => remove(b.id)} className="p-1 opacity-60 hover:opacity-100 shrink-0"><Trash2 size={14} color={COLORS.inkSoft} /></button>
             </div>
           ))}
         </div>
       )}
-    </div>
-  );
-}
 
-// ---------- 罗盘指南: the synthesis tab ----------
-function GuideTab({ data, mutate }) {
-  const [busyPlan, setBusyPlan] = useState(false);
-  const [busyTriage, setBusyTriage] = useState(false);
-  const [error, setError] = useState("");
-
-  const untriaged = data.boxEntries.filter((b) => !b.triage);
-  const todos = data.boxEntries.filter((b) => b.triage === "todo");
-
-  const generatePlan = async () => {
-    setError(""); setBusyPlan(true);
-    try {
-      const list = data.ideas.map((i) => `- [${i.tag}] ${i.text}（记于 ${fmtDate(new Date(i.createdAt).toISOString().slice(0,10))}）`).join("\n") || "（暂无想法）";
-      const result = await callClaude(
-        "你是帮助内容创作者规划发布节奏的助手。请始终用中文回复，具体到给出大致的发布顺序或时间安排，不要泛泛而谈。",
-        `这是目前积累的创作想法：\n${list}\n\n请给出这些想法大致应该按什么顺序、什么时间节奏去发布或处理，哪些该优先。`
-      );
-      mutate((d) => ({ ...d, publishPlan: { text: result, generatedAt: Date.now() } }));
-    } catch (e) { setError(e.message || "生成失败，请重试"); } finally { setBusyPlan(false); }
-  };
-
-  const triage = async () => {
-    setError(""); setBusyTriage(true);
-    try {
-      const list = untriaged.map((b) => `- id: ${b.id}\n  内容: ${b.text}`).join("\n");
-      const raw = await callClaude(
-        "你是帮助整理个人碎片记录的助手。你会收到若干条随手记下的话，每条有一个id。请判断每一条是「待办事项」（有具体要去做的行动）还是「只是一个想法」（感受、随笔、没有具体行动）。如果是待办事项，尽量保留原文，不需要改写；如果原文已经很清楚就直接原样返回。只返回JSON数组，不要有任何其他文字或解释，格式：[{\"id\":\"xxx\",\"type\":\"todo\",\"text\":\"...\"},{\"id\":\"xxx\",\"type\":\"thought\"}]",
-        `待分类的条目：\n${list}`
-      );
-      const parsed = extractJSON(raw);
-      mutate((d) => ({
-        ...d,
-        boxEntries: d.boxEntries.map((b) => {
-          const match = parsed.find((p) => p.id === b.id);
-          if (!match) return b;
-          return match.type === "todo"
-            ? { ...b, triage: "todo", todoText: match.text || b.text }
-            : { ...b, triage: "thought" };
-        }),
-      }));
-    } catch (e) { setError(e.message || "整理失败，请重试"); } finally { setBusyTriage(false); }
-  };
-
-  const toggleDone = (id) => mutate((d) => ({ ...d, boxEntries: d.boxEntries.map((b) => (b.id === id ? { ...b, done: !b.done } : b)) }));
-  const removeTodo = (id) => mutate((d) => ({ ...d, boxEntries: d.boxEntries.filter((b) => b.id !== id) }));
-
-  return (
-    <div>
-      <SectionLabel color={COLORS.content}>创作发布建议</SectionLabel>
+      <SectionLabel color={COLORS.progress}>整理脑洞</SectionLabel>
       <div className="mb-6">
-        <PrimaryButton onClick={generatePlan} disabled={busyPlan} color={COLORS.content} icon={Sparkles}>
-          生成发布建议
+        <PrimaryButton onClick={reflect} disabled={busy || data.pandoraEntries.length === 0} color={COLORS.progress} icon={Wand2}>
+          整理脑洞
         </PrimaryButton>
-        {data.publishPlan && (
-          <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3 mt-3" style={{ backgroundColor: COLORS.contentSoft, color: COLORS.ink }}>
-            {data.publishPlan.text}
+        {error && <div className="wb-body text-sm mt-3" style={{ color: COLORS.daily }}>{error}</div>}
+        {data.boxReflection && (
+          <div className="wb-body text-sm whitespace-pre-wrap rounded-sm p-3 mt-3" style={{ backgroundColor: COLORS.progressSoft, color: COLORS.ink }}>
+            {data.boxReflection.text}
           </div>
         )}
-      </div>
-
-      <SectionLabel color={COLORS.daily}>整理待办（潘多拉魔盒）</SectionLabel>
-      <div className="mb-3">
-        <PrimaryButton onClick={triage} disabled={busyTriage || untriaged.length === 0} color={COLORS.daily} icon={Inbox}>
-          {untriaged.length === 0 ? "没有新记录待整理" : `整理 ${untriaged.length} 条新记录`}
-        </PrimaryButton>
-      </div>
-      {error && <div className="wb-body text-sm mb-3" style={{ color: COLORS.daily }}>{error}</div>}
-
-      <div className="mb-6">
-        {todos.length === 0 ? <EmptyState text="还没有待办事项 — 整理一下魔盒里的记录试试" /> : (
-          <div className="space-y-2">
-            {todos.map((t) => (
-              <div key={t.id} className="flex items-center gap-2 rounded-sm border p-3" style={{ borderColor: COLORS.line }}>
-                <button onClick={() => toggleDone(t.id)}
-                  className="w-5 h-5 rounded-sm border flex items-center justify-center shrink-0"
-                  style={{ borderColor: COLORS.coaching, backgroundColor: t.done ? COLORS.coaching : "transparent" }}>
-                  {t.done && <Check size={13} color={COLORS.paper} />}
-                </button>
-                <div className="wb-body text-sm flex-1" style={{ color: t.done ? COLORS.inkSoft : COLORS.ink, textDecoration: t.done ? "line-through" : "none" }}>
-                  {t.todoText || t.text}
-                </div>
-                <button onClick={() => removeTodo(t.id)} className="p-1 opacity-60 hover:opacity-100 shrink-0"><Trash2 size={14} color={COLORS.inkSoft} /></button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      <SectionLabel color={COLORS.progress}>累计概览</SectionLabel>
-      <div className="grid grid-cols-2 gap-3">
-        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
-          <div className="wb-display text-3xl" style={{ color: COLORS.progress }}>{data.sessions.length}</div>
-          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>教练会谈</div>
-        </div>
-        <div className="rounded-sm border p-4" style={{ borderColor: COLORS.line }}>
-          <div className="wb-display text-3xl" style={{ color: COLORS.progress }}>{data.ideas.length}</div>
-          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>创作想法</div>
-        </div>
       </div>
     </div>
   );
@@ -429,7 +630,7 @@ export default function Workbench() {
       <div className="max-w-3xl mx-auto px-4 py-6">
         <header className="mb-6">
           <div className="wb-display text-2xl" style={{ color: COLORS.ink }}>执业工作台</div>
-          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>coaching · content · pandora · guide</div>
+          <div className="wb-mono text-xs mt-1" style={{ color: COLORS.inkSoft }}>coaching · content · todo · pandora</div>
         </header>
 
         <nav className="flex gap-1 mb-6 border-b" style={{ borderColor: COLORS.line }}>
@@ -454,8 +655,8 @@ export default function Workbench() {
             <>
               {active === "coaching" && <CoachingTab data={data} mutate={mutate} />}
               {active === "content" && <ContentTab data={data} mutate={mutate} />}
-              {active === "box" && <PandoraTab data={data} mutate={mutate} />}
-              {active === "guide" && <GuideTab data={data} mutate={mutate} />}
+              {active === "box" && <TodoTab data={data} mutate={mutate} />}
+              {active === "guide" && <PandoraTab data={data} mutate={mutate} />}
             </>
           )}
         </main>
